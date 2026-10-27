@@ -1,0 +1,10 @@
+package: generated
+
+generate:
+  models: true
+  embedded-spec: true
+
+compatibility:
+  preserve-original-operation-id-casing-in-embedded-spec: true
+
+output: internal/httpapi/generated/openapi.gen.go

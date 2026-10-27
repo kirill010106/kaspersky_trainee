@@ -1,0 +1,471 @@
+openapi: 3.0.0
+
+info:
+  title: Information Exchange Service
+  description: API для обмена информацией об угрозах.
+  version: 1.0.0
+
+security:
+  - BearerAuth: []
+
+paths:
+  /api/v1/info:
+    post:
+      summary: Создать запись об угрозе
+      description: Создаёт новую запись. Существующий MD5 вызывает конфликт.
+      operationId: createThreat
+      requestBody:
+        required: true
+        description: >
+          Ровно один JSON-объект размером не более 32768 байт.
+          Null, неизвестные поля, повторные ключи и неверный UTF-8 запрещены.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ThreatCreateRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/ThreatCreated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/v1/info/{md5}:
+    parameters:
+      - $ref: '#/components/parameters/MD5'
+
+    get:
+      summary: Получить информацию об угрозе
+      operationId: getInfoByMd5
+      responses:
+        '200':
+          $ref: '#/components/responses/ThreatOK'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+    put:
+      summary: Заменить информацию об угрозе
+      description: >
+        Полностью заменяет редактируемые поля существующей записи.
+        Пропуск description очищает описание.
+        MD5 и время создания сохраняются.
+        Отсутствующая запись не создаётся.
+      operationId: updateThreat
+      requestBody:
+        required: true
+        description: >
+          Ровно один JSON-объект размером не более 32768 байт.
+          Null, неизвестные поля, повторные ключи и неверный UTF-8 запрещены.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ThreatUpdateRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ThreatOK'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /livez:
+    get:
+      summary: Проверить жизнь процесса
+      description: Не обращается к БД и не ограничивается квотой запросов.
+      operationId: getLiveness
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/ProbeOK'
+
+  /readyz:
+    get:
+      summary: Проверить готовность сервиса
+      description: >
+        Проверяет доступ к ожидаемой схеме PostgreSQL.
+        Пустая таблица угроз считается готовой.
+        Использует отдельный от бизнес-API лимитер.
+      operationId: getReadiness
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/ProbeOK'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Статический ключ reader или writer.
+        GET бизнес-API доступен обеим ролям.
+        POST и PUT доступны только writer.
+  schemas:
+    ThreatType:
+      type: string
+      enum:
+        - trojan
+        - ransomware
+        - spyware
+        - adware
+        - worm
+        - other
+
+    Severity:
+      type: string
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+
+    ThreatResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - md5
+        - name
+        - description
+        - type
+        - severity
+        - created_at
+        - updated_at
+      properties:
+        md5:
+          type: string
+          pattern: '^[a-f0-9]{32}$'
+          description: MD5 файла в нижнем регистре.
+          example: d41d8cd98f00b204e9800998ecf8427e
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Название угрозы без пробелов по краям.
+          example: Trojan.Win32.Generic
+        description:
+          type: string
+          maxLength: 4096
+          description: Описание угрозы; может быть пустой строкой.
+        type:
+          $ref: '#/components/schemas/ThreatType'
+        severity:
+          $ref: '#/components/schemas/Severity'
+        created_at:
+          type: string
+          format: date-time
+          description: Серверное время создания записи в UTC.
+        updated_at:
+          type: string
+          format: date-time
+          description: Серверное время последней записи в UTC.
+    
+    ThreatCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - md5
+        - name
+        - type
+        - severity
+      properties:
+        md5:
+          type: string
+          pattern: '^[a-fA-F0-9]{32}$'
+          description: MD5 файла; принимается любой регистр, пробелы запрещены.
+          example: d41d8cd98f00b204e9800998ecf8427e
+        name:
+          type: string
+          minLength: 1
+          description: >
+            Название угрозы. После удаления Unicode-пробелов по краям
+            должно содержать от 1 до 200 Unicode-кодовых точек.
+            Символ U+0000 запрещён.
+          example: Trojan.Win32.Generic
+        description:
+          type: string
+          maxLength: 4096
+          description: >
+            Описание угрозы. Пропуск означает пустую строку.
+            Пробелы и переносы сохраняются. Символ U+0000 запрещён.
+        type:
+          $ref: '#/components/schemas/ThreatType'
+        severity:
+          $ref: '#/components/schemas/Severity'
+
+    ThreatUpdateRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - type
+        - severity
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: >
+            Название угрозы. После удаления Unicode-пробелов по краям
+            должно содержать от 1 до 200 Unicode-кодовых точек.
+            Символ U+0000 запрещён.
+          example: Trojan.Win32.Generic
+        description:
+          type: string
+          maxLength: 4096
+          description: >
+            Новое описание угрозы. Пропуск очищает существующее описание.
+            Пробелы и переносы сохраняются. Символ U+0000 запрещён.
+        type:
+          $ref: '#/components/schemas/ThreatType'
+        severity:
+          $ref: '#/components/schemas/Severity'
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          description: Безопасное описание ошибки.
+        details:
+          type: string
+          description: Необязательное уточнение ошибки.
+    
+  parameters:
+    MD5:
+      name: md5
+      in: path
+      required: true
+      description: MD5 файла; принимается любой регистр, пробелы запрещены.
+      schema:
+        type: string
+        pattern: '^[a-fA-F0-9]{32}$'
+        example: d41d8cd98f00b204e9800998ecf8427e
+
+  headers:
+    RequestID:
+      description: Идентификатор запроса, назначенный сервером.
+      schema:
+        type: string
+
+    NoStore:
+      description: Ответ не должен сохраняться в кеше.
+      schema:
+        type: string
+        enum: [no-store]
+    
+    RetryAfter:
+      description: Количество секунд до следующей попытки.
+      schema:
+        type: integer
+        minimum: 0
+
+  responses:
+    ThreatOK:
+      description: Успешный ответ с полной записью об угрозе.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ThreatResponse'
+
+    ThreatCreated:
+      description: Запись об угрозе создана.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        Location:
+          description: Относительный путь созданной записи с lowercase MD5.
+          schema:
+            type: string
+            pattern: '^/api/v1/info/[a-f0-9]{32}$'
+            example: /api/v1/info/d41d8cd98f00b204e9800998ecf8427e
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ThreatResponse'
+
+    BadRequest:
+      description: Некорректный MD5, JSON или значения полей.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    NotFound:
+      description: Запись с указанным MD5 не найдена.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Conflict:
+      description: Запись с указанным MD5 уже существует.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    InternalServerError:
+      description: Внутренняя ошибка сервера.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Unauthorized:
+      description: Bearer-ключ отсутствует или недействителен.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        WWW-Authenticate:
+          description: Требуется аутентификация по схеме Bearer.
+          schema:
+            type: string
+            enum: [Bearer]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Forbidden:
+      description: Ключ действителен, но роль не разрешает эту операцию.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    PayloadTooLarge:
+      description: Тело запроса превышает 32768 байт.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    UnsupportedMediaType:
+      description: >
+        Content-Type отсутствует или не соответствует application/json,
+        либо передан неподдерживаемый Content-Encoding.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    TooManyRequests:
+      description: >
+        Исчерпана квота запросов для IP.
+        Бизнес-API и readyz используют независимые счётчики.
+        Начальное значение каждой квоты — 120 запросов в минуту.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    ServiceUnavailable:
+      description: Сервис не готов обслуживать бизнес-запросы.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    ProbeOK:
+      description: Проверка пройдена; тело ответа отсутствует.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
