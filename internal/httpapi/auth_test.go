@@ -97,6 +97,9 @@ func TestNewAuthenticatorRejectsInvalidKeys(t *testing.T) {
 		{name: "empty reader", writer: "writer"},
 		{name: "empty writer", reader: "reader"},
 		{name: "same keys", reader: "same", writer: "same"},
+		{name: "space in reader", reader: "reader key", writer: "writer"},
+		{name: "Unicode space in writer", reader: "reader", writer: "writer\u00a0key"},
+		{name: "control in reader", reader: "reader\x00key", writer: "writer"},
 	}
 
 	for _, tt := range tests {

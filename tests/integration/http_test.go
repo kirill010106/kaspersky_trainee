@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -28,7 +29,10 @@ func testHTTPSlice(t *testing.T, ctx context.Context, dsn string) {
 	}
 	defer pool.Close()
 
-	repository := storagepostgres.New(pool)
+	repository, err := storagepostgres.New(pool, 3*time.Second)
+	if err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
 	threatService := service.New(repository)
 
 	const (
@@ -60,7 +64,7 @@ func testHTTPSlice(t *testing.T, ctx context.Context, dsn string) {
 		}
 
 		req.Header.Set("Authorization", "Bearer "+key)
-		if method == http.MethodPost {
+		if method == http.MethodPost || method == http.MethodPut {
 			req.Header.Set("Content-Type", "application/json")
 		}
 
@@ -166,5 +170,97 @@ func testHTTPSlice(t *testing.T, ctx context.Context, dsn string) {
 	)
 	if status != http.StatusNotFound {
 		t.Fatalf("missing GET status = %d, want 404; body = %s", status, responseBody)
+	}
+	replacement := `{
+		"name": " Updated threat ",
+		"type": "worm",
+		"severity": "critical"
+	}`
+
+	status, _, responseBody = request(
+		http.MethodPut,
+		"/api/v1/info/"+inputMD5,
+		readerKey,
+		replacement,
+	)
+	if status != http.StatusForbidden {
+		t.Fatalf("reader PUT status = %d, want 403; body = %s", status, responseBody)
+	}
+
+	status, _, responseBody = request(
+		http.MethodPut,
+		"/api/v1/info/"+inputMD5,
+		writerKey,
+		replacement,
+	)
+	if status != http.StatusOK {
+		t.Fatalf("writer PUT status = %d, want 200; body = %s", status, responseBody)
+	}
+
+	var updated generated.ThreatResponse
+	if err := json.Unmarshal(responseBody, &updated); err != nil {
+		t.Fatalf("decode PUT response: %v", err)
+	}
+
+	if updated.Md5 != md5 ||
+		updated.Name != "Updated threat" ||
+		updated.Description != "" ||
+		updated.Type != generated.Worm ||
+		updated.Severity != generated.Critical ||
+		!updated.CreatedAt.Equal(created.CreatedAt) ||
+		updated.UpdatedAt.IsZero() {
+		t.Fatalf("unexpected PUT response: %+v", updated)
+	}
+
+	status, _, responseBody = request(
+		http.MethodGet,
+		"/api/v1/info/"+md5,
+		readerKey,
+		"",
+	)
+	if status != http.StatusOK {
+		t.Fatalf("GET after PUT status = %d, want 200; body = %s", status, responseBody)
+	}
+
+	var afterUpdate generated.ThreatResponse
+	if err := json.Unmarshal(responseBody, &afterUpdate); err != nil {
+		t.Fatalf("decode GET after PUT: %v", err)
+	}
+
+	if afterUpdate.Md5 != updated.Md5 ||
+		afterUpdate.Name != updated.Name ||
+		afterUpdate.Description != updated.Description ||
+		afterUpdate.Type != updated.Type ||
+		afterUpdate.Severity != updated.Severity ||
+		!afterUpdate.CreatedAt.Equal(updated.CreatedAt) ||
+		!afterUpdate.UpdatedAt.Equal(updated.UpdatedAt) {
+		t.Fatalf("GET after PUT = %+v, want %+v", afterUpdate, updated)
+	}
+
+	status, _, responseBody = request(
+		http.MethodPut,
+		"/api/v1/info/"+missingMD5,
+		writerKey,
+		replacement,
+	)
+	if status != http.StatusNotFound {
+		t.Fatalf("missing PUT status = %d, want 404; body = %s", status, responseBody)
+	}
+
+	bodyWithMD5 := `{
+		"md5": "` + md5 + `",
+		"name": "Another threat",
+		"type": "trojan",
+		"severity": "low"
+	}`
+
+	status, _, responseBody = request(
+		http.MethodPut,
+		"/api/v1/info/"+md5,
+		writerKey,
+		bodyWithMD5,
+	)
+	if status != http.StatusBadRequest {
+		t.Fatalf("PUT with MD5 in body status = %d, want 400; body = %s", status, responseBody)
 	}
 }

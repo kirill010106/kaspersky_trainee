@@ -65,13 +65,9 @@ func TestGetThreat(t *testing.T) {
 		{
 			name: "existing threat with uppercase MD5",
 			md5:  uppercaseMD5,
-			get: func(ctx context.Context, md5 string) (domain.Threat, error) {
+			get: func(_ context.Context, md5 string) (domain.Threat, error) {
 				if md5 != lowercaseMD5 {
 					t.Errorf("repository received MD5 %q, want %q", md5, lowercaseMD5)
-				}
-
-				if _, ok := ctx.Deadline(); !ok {
-					t.Error("repository context has no deadline")
 				}
 
 				return domain.Threat{
@@ -182,7 +178,7 @@ func TestCreateThreat(t *testing.T) {
 
 	repository := &fakeRepository{
 		create: func(
-			ctx context.Context,
+			_ context.Context,
 			md5 string,
 			data domain.ThreatData,
 		) (domain.Threat, error) {
@@ -195,10 +191,6 @@ func TestCreateThreat(t *testing.T) {
 				data.Type != domain.ThreatTypeTrojan ||
 				data.Severity != domain.SeverityHigh {
 				t.Errorf("repository received unexpected data: %+v", data)
-			}
-
-			if _, ok := ctx.Deadline(); !ok {
-				t.Error("repository context has no deadline")
 			}
 
 			return domain.Threat{

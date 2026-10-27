@@ -138,7 +138,10 @@ func TestMigrations(t *testing.T) {
 		}
 		defer pool.Close()
 
-		repository := storagepostgres.New(pool)
+		repository, err := storagepostgres.New(pool, 3*time.Second)
+		if err != nil {
+			t.Fatalf("create repository: %v", err)
+		}
 
 		const md5 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -245,6 +248,36 @@ func TestMigrations(t *testing.T) {
 		_, err = repository.Create(ctx, md5, data)
 		if !errors.Is(err, service.ErrAlreadyExists) {
 			t.Fatalf("expected ErrAlreadyExists, got: %v", err)
+		}
+	})
+
+	t.Run("repository timeout", func(t *testing.T) {
+		config, err := pgxpool.ParseConfig(dsn)
+		if err != nil {
+			t.Fatalf("parse pool config: %v", err)
+		}
+		config.MaxConns = 1
+
+		pool, err := pgxpool.NewWithConfig(ctx, config)
+		if err != nil {
+			t.Fatalf("create pool: %v", err)
+		}
+		defer pool.Close()
+
+		connection, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire connection: %v", err)
+		}
+		defer connection.Release()
+
+		repository, err := storagepostgres.New(pool, 100*time.Millisecond)
+		if err != nil {
+			t.Fatalf("create repository: %v", err)
+		}
+
+		_, err = repository.Get(ctx, existingMD5)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected repository timeout, got: %v", err)
 		}
 	})
 

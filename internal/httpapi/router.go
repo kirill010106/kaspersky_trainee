@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"mime"
@@ -15,6 +16,19 @@ import (
 	"github.com/kirill010106/kaspersky_trainee/internal/httpapi/generated"
 	"github.com/kirill010106/kaspersky_trainee/internal/service"
 )
+
+type requestIDContextKey struct{}
+
+func responseHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := rand.Text()
+		w.Header().Set("X-Request-ID", id)
+		w.Header().Set("Cache-Control", "no-store")
+
+		ctx := context.WithValue(r.Context(), requestIDContextKey{}, id)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
 
 // NewRouter creates the HTTP router for the threat service.
 func NewRouter(
@@ -76,6 +90,40 @@ func NewRouter(
 
 	router := chi.NewRouter()
 
+	router.Use(responseHeaders)
+
+	router.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusNotFound, generated.ErrorResponse{
+			Message: "not found",
+		})
+	})
+
+	router.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.RawPath
+		if path == "" {
+			path = r.URL.Path
+		}
+
+		var allowed []string
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut} {
+			if router.Match(chi.NewRouteContext(), method, path) {
+				allowed = append(allowed, method)
+			}
+		}
+
+		if len(allowed) == 0 {
+			writeJSON(w, http.StatusNotFound, generated.ErrorResponse{
+				Message: "not found",
+			})
+			return
+		}
+
+		w.Header().Set("Allow", strings.Join(allowed, ", "))
+		writeJSON(w, http.StatusMethodNotAllowed, generated.ErrorResponse{
+			Message: "method not allowed",
+		})
+	})
+
 	router.With(
 		auth.authenticate,
 		validate,
@@ -88,6 +136,14 @@ func NewRouter(
 		requireJSON,
 		validate,
 	).Post("/api/v1/info", handler.createThreat)
+
+	router.With(
+		auth.authenticate,
+		requireWriter,
+		limitRequestBody,
+		requireJSON,
+		validate,
+	).Put("/api/v1/info/{md5}", handler.updateThreat)
 
 	return router, nil
 }

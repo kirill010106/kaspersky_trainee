@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -16,13 +17,25 @@ import (
 // Repository stores threats in PostgreSQL.
 // The caller owns the pool and is responsible for closing it.
 type Repository struct {
-	pool *pgxpool.Pool
+	pool         *pgxpool.Pool
+	queryTimeout time.Duration
 }
 
 var _ service.Repository = (*Repository)(nil)
 
-func New(pool *pgxpool.Pool) *Repository {
-	return &Repository{pool: pool}
+// New creates a repository with a timeout for each database operation.
+func New(pool *pgxpool.Pool, queryTimeout time.Duration) (*Repository, error) {
+	if pool == nil {
+		return nil, errors.New("postgres pool is nil")
+	}
+	if queryTimeout <= 0 {
+		return nil, fmt.Errorf("query timeout must be positive: %s", queryTimeout)
+	}
+
+	return &Repository{
+		pool:         pool,
+		queryTimeout: queryTimeout,
+	}, nil
 }
 
 func (r *Repository) Create(
@@ -38,8 +51,11 @@ func (r *Repository) Create(
 
 	var threat domain.Threat
 
+	queryCtx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+
 	err := r.pool.QueryRow(
-		ctx,
+		queryCtx,
 		query,
 		md5,
 		data.Name,
@@ -80,7 +96,10 @@ func (r *Repository) Get(ctx context.Context, md5 string) (domain.Threat, error)
 
 	var threat domain.Threat
 
-	err := r.pool.QueryRow(ctx, query, md5).Scan(
+	queryCtx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+
+	err := r.pool.QueryRow(queryCtx, query, md5).Scan(
 		&threat.MD5,
 		&threat.Name,
 		&threat.Description,
@@ -118,8 +137,11 @@ func (r *Repository) Replace(
 
 	var threat domain.Threat
 
+	queryCtx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+
 	err := r.pool.QueryRow(
-		ctx,
+		queryCtx,
 		query,
 		md5,
 		data.Name,

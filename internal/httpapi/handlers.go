@@ -1,12 +1,10 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json/v2"
 	"errors"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -15,7 +13,6 @@ import (
 	"github.com/kirill010106/kaspersky_trainee/internal/service"
 )
 
-const databaseTimeout = 3 * time.Second
 const maxRequestBody = 32 * 1024
 
 type handlers struct {
@@ -25,10 +22,7 @@ type handlers struct {
 func (h *handlers) getThreat(w http.ResponseWriter, r *http.Request) {
 	md5 := chi.URLParam(r, "md5")
 
-	ctx, cancel := context.WithTimeout(r.Context(), databaseTimeout)
-	defer cancel()
-
-	threat, err := h.service.Get(ctx, md5)
+	threat, err := h.service.Get(r.Context(), md5)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -91,29 +85,9 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func (h *handlers) createThreat(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			writeJSON(w, http.StatusRequestEntityTooLarge, generated.ErrorResponse{
-				Message: "request body too large",
-			})
-			return
-		}
-
-		writeJSON(w, http.StatusBadRequest, generated.ErrorResponse{
-			Message: "invalid request body",
-		})
-		return
-	}
-
 	var request generated.ThreatCreateRequest
 
-	if err := json.Unmarshal(body, &request, json.RejectUnknownMembers(true)); err != nil {
-		writeJSON(w, http.StatusBadRequest, generated.ErrorResponse{
-			Message: "invalid JSON",
-		})
+	if !decodeRequest(w, r, &request) {
 		return
 	}
 
@@ -129,10 +103,7 @@ func (h *handlers) createThreat(w http.ResponseWriter, r *http.Request) {
 		Severity:    domain.Severity(request.Severity),
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), databaseTimeout)
-	defer cancel()
-
-	threat, err := h.service.Create(ctx, request.Md5, data)
+	threat, err := h.service.Create(r.Context(), request.Md5, data)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -140,4 +111,59 @@ func (h *handlers) createThreat(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", "/api/v1/info/"+threat.MD5)
 	writeJSON(w, http.StatusCreated, threatResponse(threat))
+}
+
+func (h *handlers) updateThreat(w http.ResponseWriter, r *http.Request) {
+	var request generated.ThreatUpdateRequest
+
+	if !decodeRequest(w, r, &request) {
+		return
+	}
+
+	description := ""
+	if request.Description != nil {
+		description = *request.Description
+	}
+
+	data := domain.ThreatData{
+		Name:        request.Name,
+		Description: description,
+		Type:        domain.ThreatType(request.Type),
+		Severity:    domain.Severity(request.Severity),
+	}
+
+	threat, err := h.service.Replace(r.Context(), chi.URLParam(r, "md5"), data)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, threatResponse(threat))
+}
+
+func decodeRequest(w http.ResponseWriter, r *http.Request, destination any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			writeJSON(w, http.StatusRequestEntityTooLarge, generated.ErrorResponse{
+				Message: "request body too large",
+			})
+			return false
+		}
+
+		writeJSON(w, http.StatusBadRequest, generated.ErrorResponse{
+			Message: "invalid request body",
+		})
+		return false
+	}
+
+	if err := json.Unmarshal(body, destination, json.RejectUnknownMembers(true)); err != nil {
+		writeJSON(w, http.StatusBadRequest, generated.ErrorResponse{
+			Message: "invalid JSON",
+		})
+		return false
+	}
+	return true
 }

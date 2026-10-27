@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/kirill010106/kaspersky_trainee/internal/httpapi/generated"
 )
@@ -24,9 +25,19 @@ type authenticator struct {
 	writerKey string
 }
 
+func invalidBearerKeyRune(r rune) bool {
+	return unicode.IsSpace(r) || unicode.IsControl(r)
+}
+
 func newAuthenticator(readerKey, writerKey string) (*authenticator, error) {
 	if readerKey == "" || writerKey == "" {
 		return nil, errors.New("reader and writer keys must not be empty")
+	}
+
+	if strings.ContainsFunc(readerKey, invalidBearerKeyRune) || strings.ContainsFunc(writerKey, invalidBearerKeyRune) {
+		return nil, errors.New(
+			"reader and writer keys must not contain whitespace or control characters",
+		)
 	}
 
 	if readerKey == writerKey {
