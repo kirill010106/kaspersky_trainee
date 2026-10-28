@@ -73,8 +73,26 @@ func TestMigrations(t *testing.T) {
 		t.Fatalf("ping database: %v", err)
 	}
 
+	readinessPool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("create readiness pool: %v", err)
+	}
+	t.Cleanup(readinessPool.Close)
+
+	readinessRepo, err := storagepostgres.New(readinessPool, 3*time.Second)
+	if err != nil {
+		t.Fatalf("create readiness repository: %v", err)
+	}
+	if err := readinessRepo.CheckReady(ctx); err == nil {
+		t.Fatal("expected readiness error before migration")
+	}
+
 	if err := migrations.Up(ctx, db); err != nil {
 		t.Fatalf("apply migrations: %v", err)
+	}
+
+	if err := readinessRepo.CheckReady(ctx); err != nil {
+		t.Fatalf("check empty threats table: %v", err)
 	}
 
 	const existingMD5 = "d41d8cd98f00b204e9800998ecf8427e"
@@ -278,6 +296,85 @@ func TestMigrations(t *testing.T) {
 		_, err = repository.Get(ctx, existingMD5)
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("expected repository timeout, got: %v", err)
+		}
+	})
+
+	t.Run("concurrent replace is atomic", func(t *testing.T) {
+		threatService := service.New(readinessRepo)
+		md5 := strings.Repeat("f", 32)
+
+		created, err := threatService.Create(ctx, md5, domain.ThreatData{
+			Name:        "Initial",
+			Description: "Initial description",
+			Type:        domain.ThreatTypeTrojan,
+			Severity:    domain.SeverityLow,
+		})
+		if err != nil {
+			t.Fatalf("create threat: %v", err)
+		}
+
+		updates := [2]domain.ThreatData{
+			{
+				Name:        "First",
+				Description: "First description",
+				Type:        domain.ThreatTypeRansomware,
+				Severity:    domain.SeverityHigh,
+			},
+			{
+				Name:        "Second",
+				Description: "Second description",
+				Type:        domain.ThreatTypeSpyware,
+				Severity:    domain.SeverityCritical,
+			},
+		}
+
+		testCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		ready := make(chan struct{}, 2)
+		start := make(chan struct{})
+		results := make(chan error, 2)
+
+		for _, data := range updates {
+			go func(data domain.ThreatData) {
+				ready <- struct{}{}
+				<-start
+				_, err := threatService.Replace(testCtx, md5, data)
+				results <- err
+			}(data)
+		}
+
+		<-ready
+		<-ready
+		close(start)
+
+		for range 2 {
+			select {
+			case err := <-results:
+				if err != nil {
+					t.Fatalf("replace threat: %v", err)
+				}
+			case <-testCtx.Done():
+				t.Fatalf("concurrent replace timed out: %v", testCtx.Err())
+			}
+		}
+
+		got, err := threatService.Get(ctx, md5)
+		if err != nil {
+			t.Fatalf("get threat: %v", err)
+		}
+		if !got.CreatedAt.Equal(created.CreatedAt) {
+			t.Fatal("created_at changed")
+		}
+
+		matches := func(data domain.ThreatData) bool {
+			return got.Name == data.Name &&
+				got.Description == data.Description &&
+				got.Type == data.Type &&
+				got.Severity == data.Severity
+		}
+		if !matches(updates[0]) && !matches(updates[1]) {
+			t.Fatalf("final record contains a mixed update: %+v", got)
 		}
 	})
 

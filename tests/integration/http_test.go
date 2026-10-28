@@ -40,7 +40,14 @@ func testHTTPSlice(t *testing.T, ctx context.Context, dsn string) {
 		writerKey = "writer-test-key"
 	)
 
-	router, err := httpapi.NewRouter(threatService, readerKey, writerKey)
+	router, err := httpapi.NewRouter(threatService, httpapi.RouterOptions{
+		ReaderKey:              readerKey,
+		WriterKey:              writerKey,
+		CheckReady:             repository.CheckReady,
+		ReadinessTimeout:       time.Second,
+		APIRatePerMinute:       120,
+		ReadinessRatePerMinute: 120,
+	})
 	if err != nil {
 		t.Fatalf("create router: %v", err)
 	}
@@ -63,7 +70,9 @@ func testHTTPSlice(t *testing.T, ctx context.Context, dsn string) {
 			t.Fatalf("create request: %v", err)
 		}
 
-		req.Header.Set("Authorization", "Bearer "+key)
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
 		if method == http.MethodPost || method == http.MethodPut {
 			req.Header.Set("Content-Type", "application/json")
 		}
@@ -80,6 +89,11 @@ func testHTTPSlice(t *testing.T, ctx context.Context, dsn string) {
 		}
 
 		return resp.StatusCode, resp.Header, responseBody
+	}
+
+	readyStatus, _, readyBody := request(http.MethodGet, "/readyz", "", "")
+	if readyStatus != http.StatusOK || len(readyBody) != 0 {
+		t.Fatalf("readyz status = %d, body = %q; want 200 and empty body", readyStatus, readyBody)
 	}
 
 	const (
@@ -263,4 +277,89 @@ func testHTTPSlice(t *testing.T, ctx context.Context, dsn string) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("PUT with MD5 in body status = %d, want 400; body = %s", status, responseBody)
 	}
+
+	t.Run("concurrent POST same MD5", func(t *testing.T) {
+		md5 := strings.Repeat("e", 32)
+		body := `{"md5":"` + md5 + `","name":"Concurrent threat","type":"trojan","severity":"high"}`
+
+		requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		ready := make(chan struct{}, 2)
+		start := make(chan struct{})
+		results := make(chan int, 2)
+
+		for range 2 {
+			go func() {
+				req := httptest.NewRequest(
+					http.MethodPost,
+					"/api/v1/info",
+					strings.NewReader(body),
+				).WithContext(requestCtx)
+				req.Header.Set("Authorization", "Bearer "+writerKey)
+				req.Header.Set("Content-Type", "application/json")
+
+				response := httptest.NewRecorder()
+				ready <- struct{}{}
+				<-start
+
+				router.ServeHTTP(response, req)
+				results <- response.Code
+			}()
+		}
+
+		<-ready
+		<-ready
+		close(start)
+
+		statuses := make([]int, 0, 2)
+		for range 2 {
+			select {
+			case status := <-results:
+				statuses = append(statuses, status)
+			case <-requestCtx.Done():
+				t.Fatalf("concurrent POST timed out: %v", requestCtx.Err())
+			}
+		}
+
+		if !((statuses[0] == http.StatusCreated && statuses[1] == http.StatusConflict) ||
+			(statuses[0] == http.StatusConflict && statuses[1] == http.StatusCreated)) {
+			t.Fatalf("statuses = %v, want one 201 and one 409", statuses)
+		}
+
+		var count int
+		if err := pool.QueryRow(ctx,
+			"SELECT count(*) FROM threats WHERE md5 = $1", md5,
+		).Scan(&count); err != nil {
+			t.Fatalf("count stored threats: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("stored threats = %d, want 1", count)
+		}
+
+		pool.Close()
+
+		status, _, responseBody = request(http.MethodGet, "/readyz", "", "")
+		if status != http.StatusServiceUnavailable {
+			t.Fatalf("readyz with closed pool: status = %d, want 503; body = %s",
+				status, responseBody)
+		}
+		if strings.Contains(string(responseBody), "closed pool") {
+			t.Fatalf("readyz exposed storage error: %s", responseBody)
+		}
+
+		status, _, responseBody = request(
+			http.MethodGet,
+			"/api/v1/info/"+md5,
+			readerKey,
+			"",
+		)
+		if status != http.StatusInternalServerError {
+			t.Fatalf("GET with closed pool: status = %d, want 500; body = %s",
+				status, responseBody)
+		}
+		if strings.Contains(string(responseBody), "closed pool") {
+			t.Fatalf("GET exposed storage error: %s", responseBody)
+		}
+	})
 }

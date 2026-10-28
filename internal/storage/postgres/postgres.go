@@ -38,6 +38,18 @@ func New(pool *pgxpool.Pool, queryTimeout time.Duration) (*Repository, error) {
 	}, nil
 }
 
+func (r *Repository) CheckReady(ctx context.Context) error {
+	const query = `
+		SELECT md5, name, description, type, severity, created_at, updated_at
+		FROM threats
+		LIMIT 0
+	`
+
+	if _, err := r.pool.Exec(ctx, query); err != nil {
+		return fmt.Errorf("check threats schema: %w", err)
+	}
+	return nil
+}
 func (r *Repository) Create(
 	ctx context.Context,
 	md5 string,

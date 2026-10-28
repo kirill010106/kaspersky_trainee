@@ -1,108 +1,132 @@
 # Safeboard
 
-Проект REST-сервиса для хранения и обмена метаданными об угрозах. Запись определяется MD5 файла и содержит название, описание, категорию, уровень опасности и время изменения. Загрузка файлов, вычисление хешей и антивирусное сканирование в задачи сервиса не входят.
+REST-сервис для хранения сведений об угрозах по MD5 файла. Он хранит метаданные, но не принимает файлы, не вычисляет хеши и не выполняет антивирусный анализ.
 
-## Состояние проекта
+## Что реализовано
 
-Реализованы OpenAPI-контракт, сгенерированные HTTP-модели и встроенная спецификация, доменная валидация, сервис сценариев, миграция и PostgreSQL-адаптер с операциями создания, чтения и полной замены записи.
+- `POST /api/v1/info` создаёт запись; повторный MD5 возвращает `409`.
+- `GET /api/v1/info/{md5}` читает запись; `PUT /api/v1/info/{md5}` полностью заменяет её редактируемые поля. Отсутствующая запись возвращает `404`.
+- `/livez` проверяет HTTP-процесс, `/readyz` — доступ к ожидаемой схеме PostgreSQL. Обе пробы доступны без ключа.
+- HTTPS завершается в Go-сервисе. Reader-ключ разрешает GET, writer-ключ — GET, POST и PUT. Для зарегистрированных маршрутов API и `/readyz` действуют независимые лимиты по IP, по умолчанию по 120 запросов в минуту. `/livez` не лимитируется.
+- Миграции запускаются отдельной командой `migrate` того же бинарника до запуска `serve`; автоматически при старте API схема не меняется. Поддерживается только применение миграций Up.
 
-Роутер содержит POST, GET и PUT с Bearer-аутентификацией, проверкой роли, ограничением тела, строгим JSON и OpenAPI-валидацией. Он возвращает JSON для 404/405, `X-Request-ID` и `Cache-Control: no-store`. Интеграционный тест содержит сценарий POST → GET → PUT → GET через настоящий роутер и PostgreSQL, включая очистку описания, сохранение времени создания и ошибки 400/403/404/409.
+Роутер применяет ограничение тела 32 КиБ, OpenAPI-валидацию и строгий разбор JSON. Ответы содержат `X-Request-ID` и `Cache-Control: no-store`; структурированный access log использует тот же ID и не записывает ключи или тела запросов. Формат API описан в [OpenAPI](api/openapi.yaml).
 
-В `cmd/service` добавлен отдельный режим `migrate` с конфигурацией из окружения. Его запуск через CLI на тестовой БД в текущем этапе ещё не подтверждён. Режим `serve`, HTTPS, пробы, rate limit, access log, Docker Compose и рабочий запуск API пока отсутствуют. Оставшиеся работы перечислены ниже.
+## Быстрый запуск через Docker Compose
 
-## Контракт API
+Нужны Docker с Compose, OpenSSL и свободный локальный порт `8443`. Команды ниже предназначены для PowerShell и выполняются из корня репозитория. Создайте локальные секреты; `.env`, `*.key` и `*.pem` исключены из Git:
 
-Спецификация: [api/openapi.yaml](api/openapi.yaml), OpenAPI 3.0.0. Таблица описывает целевое поведение API.
+```powershell
+if (Test-Path .env) { throw ".env already exists; reuse it for the existing database volume" }
+@(
+  "POSTGRES_PASSWORD=$((openssl rand -hex 32).Trim())"
+  "READER_KEY=$((openssl rand -hex 32).Trim())"
+  "WRITER_KEY=$((openssl rand -hex 32).Trim())"
+) | Set-Content .env
 
-| Метод | Путь | Назначение |
-| --- | --- | --- |
-| POST | `/api/v1/info` | Создать запись; существующий MD5 вызывает 409 |
-| GET | `/api/v1/info/{md5}` | Получить запись; отсутствие вызывает 404 |
-| PUT | `/api/v1/info/{md5}` | Заменить редактируемые поля существующей записи; отсутствие вызывает 404 |
-| GET | `/livez` | Проверить жизнь процесса без обращения к БД |
-| GET | `/readyz` | Проверить доступ к ожидаемой схеме БД |
+New-Item -ItemType Directory -Force .local | Out-Null
+openssl req -x509 -newkey rsa:2048 -sha256 -noenc -days 7 `
+  -keyout .local/safeboard.key -out .local/safeboard.pem `
+  -subj "/CN=localhost" `
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+```
 
-POST принимает MD5 в JSON-теле. Для GET и PUT MD5 передаётся в пути URL; в теле PUT идентификатор запрещён. Успешный POST возвращает 201 и `Location`; GET и PUT — 200. Бизнес-операции возвращают полную запись.
+Если `.env` уже существует, пропустите его создание: смена пароля в файле не меняет пароль PostgreSQL в существующем томе. Если OpenSSL в Windows не находит `openssl.cnf`, задайте `OPENSSL_CONF` путём к конфигурации своей установки OpenSSL и повторите команду выпуска сертификата. Не добавляйте локальный ключ в репозиторий. Сертификат служит только для локальной проверки; клиент должен явно доверять ему.
 
-### Правила данных
+```powershell
+docker compose config -q
+docker compose up --build -d
+docker compose ps -a
+```
+
+Ожидаемое состояние: `db` — healthy, `migrate` — `Exited (0)`, `api` — Up. API опубликован только на `127.0.0.1:8443`; PostgreSQL доступен лишь внутри сети Compose. Проверка сертификата и проб:
+
+```powershell
+curl.exe --noproxy "*" --cacert .local/safeboard.pem `
+  --resolve localhost:8443:127.0.0.1 -i https://localhost:8443/livez
+curl.exe --noproxy "*" --cacert .local/safeboard.pem `
+  --resolve localhost:8443:127.0.0.1 -i https://localhost:8443/readyz
+```
+
+Обе команды должны вернуть `200`. Для просмотра логов: `docker compose logs --tail=30 api`. `docker compose down` остановит сервисы и сохранит именованный том БД; не используйте `down -v`, если данные нужны. После повторного `up` миграции можно запускать снова: goose применяет только новые версии.
+
+### Проверка бизнес-API
+
+В той же сессии PowerShell прочитайте ключи локально, не печатая их:
+
+```powershell
+$settings = Get-Content .env -Raw | ConvertFrom-StringData
+$md5 = (openssl rand -hex 16).Trim()
+$createBody = @{
+  md5 = $md5
+  name = "Smoke threat"
+  description = "Before update"
+  type = "trojan"
+  severity = "high"
+} | ConvertTo-Json -Compress
+
+$createBody | curl.exe --noproxy "*" --cacert .local/safeboard.pem `
+  --resolve localhost:8443:127.0.0.1 -sS -i -X POST `
+  -H "Authorization: Bearer $($settings.WRITER_KEY)" `
+  -H "Content-Type: application/json" --data-binary "@-" `
+  https://localhost:8443/api/v1/info
+
+curl.exe --noproxy "*" --cacert .local/safeboard.pem `
+  --resolve localhost:8443:127.0.0.1 -sS -i `
+  -H "Authorization: Bearer $($settings.READER_KEY)" `
+  "https://localhost:8443/api/v1/info/$md5"
+```
+
+POST должен вернуть `201` и `Location`, GET — `200` с тем же MD5. Для PUT передайте `name`, `type`, `severity` на путь `/api/v1/info/$md5` с writer-ключом; пропущенный `description` станет пустой строкой.
+
+## Контракт данных
 
 | Поле | Правило |
 | --- | --- |
-| `md5` | Ровно 32 ASCII hex-символа; любой регистр на входе, lowercase после нормализации. Пробелы запрещены |
-| `name` | От 1 до 200 Unicode-кодовых точек после удаления Unicode-пробелов по краям; внутренние пробелы сохраняются |
-| `description` | До 4096 Unicode-кодовых точек; пробелы и переносы сохраняются. Пропуск означает пустую строку, в том числе при PUT |
-| `type` | `trojan`, `ransomware`, `spyware`, `adware`, `worm` или `other` |
-| `severity` | `low`, `medium`, `high` или `critical` |
-| `created_at`, `updated_at` | Серверные даты в UTC; клиент не задаёт их. При PUT время создания сохраняется |
+| `md5` | Ровно 32 ASCII hex-символа; любой регистр на входе, lowercase в ответе и БД. В POST находится в теле, в GET/PUT — в пути; в теле PUT запрещён |
+| `name` | Обязателен при POST/PUT, 1–200 Unicode-кодовых точек после удаления пробелов по краям |
+| `description` | Необязателен, до 4096 Unicode-кодовых точек; пропуск при PUT очищает значение |
+| `type` | Обязателен: `trojan`, `ransomware`, `spyware`, `adware`, `worm`, `other` |
+| `severity` | Обязателен: `low`, `medium`, `high`, `critical` |
+| `created_at`, `updated_at` | Назначаются сервером; PUT сохраняет `created_at` |
 
-Название, категория и уровень опасности обязательны при POST и PUT. В текстовых полях запрещены неверный UTF-8 и U+0000. Успешный ответ содержит все семь полей, включая пустое описание.
+POST и PUT принимают один JSON-объект с `Content-Type: application/json`, размером до 32768 байт. `null`, неизвестные и повторные поля, неверный регистр имён, плохой UTF-8 и несколько JSON-значений отклоняются. Ошибка возвращается в JSON с обязательным `message` и необязательным `details`. MD5 служит ключом поиска из задания, а не механизмом криптографической защиты.
 
-POST и PUT принимают один JSON-объект размером до 32768 байт с `Content-Type: application/json`. Неизвестные поля, неправильный регистр имён полей, повторные ключи, `null` и несколько JSON-значений отклоняются. Ошибки имеют обязательный `message` и необязательный строковый `details`. Роутер добавляет `X-Request-ID` и `Cache-Control: no-store` ко всем своим ответам; связать request ID с access log ещё предстоит.
+## Ручной запуск Go
 
-Контракт предусматривает HTTPS и два статических Bearer-ключа: reader для чтения и writer для чтения и записи. Проверка ролей подключена ко всем трём бизнес-операциям. Конструктор роутера отклоняет пустые, одинаковые ключи, а также ключи с Unicode-пробелами и управляющими символами. HTTPS, независимые per-IP квоты API и `/readyz` по 120 запросов в минуту и сами пробы пока не реализованы.
+Нужны Go 1.27.1, доступный PostgreSQL 16 с базой `safeboard` и свободный HTTPS-адрес. Переменные `DATABASE_URL`, `TLS_CERT_FILE`, `TLS_KEY_FILE`, `READER_KEY`, `WRITER_KEY` и `HTTPS_ADDR` обязательны для `serve`; `migrate` требует только `DATABASE_URL`. Go не загружает `.env` автоматически. Пример для PostgreSQL, опубликованного локально на `127.0.0.1:55432`:
 
-## Архитектура и стек
+```powershell
+$settings = Get-Content .env -Raw | ConvertFrom-StringData
+$env:DATABASE_URL = "postgres://safeboard:$($settings.POSTGRES_PASSWORD)@127.0.0.1:55432/safeboard?sslmode=disable"
+go run ./cmd/service migrate
 
-Один Go-модуль с компактной Clean Architecture. Целевой поток вызова: HTTP → сервис сценариев → интерфейс хранилища → PostgreSQL. Домен зависит только от стандартной библиотеки. Сгенерированные типы используются внутри HTTP-адаптера; SQL и HTTP-статусы не проходят через интерфейс хранилища.
-
-Подключены Go 1.27.1, chi v5.5.0, oapi-codegen v2.8.1, nethttp-middleware v1.3.1 и kin-openapi v0.152.0. Для ручного JSON-кода используется `encoding/json/v2`.
-
-Хранение использует PostgreSQL 16, pgx/v5 с pgxpool и ручной параметризованный SQL; миграцию применяет goose Provider. `cleanenv` уже читает конфигурацию режима `migrate`. Для рабочего API запланированы `log/slog`, httprate и Docker Compose. Миграции запускаются отдельным режимом того же бинарника до API.
-
-Текущая структура:
-
-```text
-api/                         OpenAPI и конфигурация генератора
-cmd/service/                 команда migrate; режим serve предстоит добавить
-internal/config/             конфигурация режима migrate
-internal/domain/             модель, нормализация и правила данных
-internal/service/             сценарии и порт хранилища
-internal/storage/postgres/    PostgreSQL-адаптер
-internal/migrations/          провайдер goose и SQL-миграции
-internal/httpapi/             роутер, обработчики POST/GET/PUT и авторизация
-internal/httpapi/generated/   сгенерированные модели, спецификация и ручные тесты
-tests/integration/            тесты с PostgreSQL и сквозной HTTP-сценарий
+$env:TLS_CERT_FILE = (Resolve-Path .local/safeboard.pem).Path
+$env:TLS_KEY_FILE = (Resolve-Path .local/safeboard.key).Path
+$env:READER_KEY = $settings.READER_KEY
+$env:WRITER_KEY = $settings.WRITER_KEY
+$env:HTTPS_ADDR = "127.0.0.1:8443"
+go run ./cmd/service serve
 ```
 
-## Миграции
+Успешный `migrate` может завершиться без сообщений. Для ручного режима PostgreSQL должен быть опубликован отдельно: стандартный `compose.yaml` не открывает порт БД на хост. Дополнительные настройки с начальными значениями: `DB_QUERY_TIMEOUT=3s`, `READINESS_TIMEOUT=1s`, `SHUTDOWN_TIMEOUT=10s`, `DB_MAX_CONNS=10`, `READ_HEADER_TIMEOUT=3s`, `READ_TIMEOUT=10s`, `WRITE_TIMEOUT=15s`, `IDLE_TIMEOUT=60s`, `MAX_HEADER_BYTES=16384`, `API_RATE_PER_MINUTE=120`, `READINESS_RATE_PER_MINUTE=120`.
 
-Команда `go run ./cmd/service migrate` читает `DATABASE_URL` из окружения, подключается к PostgreSQL и применяет только новые миграции Up. TLS-файлы и API-ключи для этого режима не требуются. Повторный запуск не должен пересоздавать таблицу. Реальный запуск команды через `cmd/service` на тестовой БД ещё нужно подтвердить; интеграционный тест отдельно проверяет миграционный адаптер и повторное применение миграций.
+## Устройство и проверки
 
-## Оставшиеся работы
+Один Go-модуль и один процесс API: HTTP-адаптер (`internal/httpapi`) → сервис сценариев (`internal/service`) → порт хранилища → PostgreSQL-адаптер (`internal/storage/postgres`). Доменная модель (`internal/domain`) не зависит от транспорта и БД. Зависимости собираются вручную в `cmd/service`; сгенерированные типы и встроенная OpenAPI остаются в `internal/httpapi/generated`.
 
-- Проверить CLI-команду `migrate` на одноразовой PostgreSQL и обновить зависимости через `go mod tidy`.
-- Добавить режим `serve`: конфигурацию, сборку зависимостей, проверку схемы до запуска, HTTPS и корректное завершение.
-- Реализовать `/livez`, `/readyz`, независимые per-IP лимитеры, безопасный access log с request ID и восстановление после panic.
-- Подготовить Dockerfile и Compose, проверить запуск с пустой БД и доверенным тестовым сертификатом.
-- Завершить проверки конкуренции, отказа БД, TLS и завершения сервера; добавить CI, проверить воспроизводимость генерации и доработать документацию кода.
-
-## Проверки
-
-Требуется Go 1.27.1. Все команды выполняются из корня репозитория.
-
-```sh
-go test ./... -v
+```powershell
+go test -count=1 ./...
 go vet ./...
+go test -count=1 -tags=integration -timeout=8m ./tests/integration
 ```
 
-Повторный прогон без кеша успешных результатов:
+Обычные тесты не требуют Docker. Интеграционные тесты запускают одноразовую PostgreSQL через Testcontainers и проверяют миграции, HTTP-сценарий, конкурентные операции, таймаут хранилища и ответы при закрытом пуле. Тестовый HTTP-сервер не проверяет TLS; работа HTTPS и сохранение данных после перезапуска Compose отдельно проверены локальным smoke-сценарием.
 
-```sh
-go test ./... -count=1
-```
+Генератор закреплён в `go.mod` как Go tool dependency. После изменения [OpenAPI](api/openapi.yaml) обновите модели командой:
 
-Обычный набор не требует Docker. Он проверяет доменные правила, сервис, обработчики и авторизацию с подставным хранилищем, а также совместимость DTO, OpenAPI-валидатора и json/v2. Отдельный набор требует работающий Docker Engine и запускает одноразовую PostgreSQL:
-
-```sh
-go test -tags=integration -timeout=8m ./tests/integration -v
-```
-
-Интеграционные тесты проверяют миграцию, PostgreSQL-адаптер и POST → GET → PUT → GET через тестовый HTTP-сервер. При отсутствии Docker явный интеграционный запуск завершается ошибкой. Тестовый сервер использует локальный HTTP: эти тесты не подтверждают HTTPS, CLI-запуск `migrate` или Docker-развёртывание приложения.
-
-## Генерация
-
-Версия oapi-codegen закреплена как tool dependency в [go.mod](go.mod); глобальная установка не требуется. Конфигурация находится в [api/oapi-codegen.yaml](api/oapi-codegen.yaml).
-
-```sh
+```powershell
 go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml
 ```
+
+Повторная генерация и отрицательные случаи TLS проверены локально; workflow CI добавлен, но ещё не запускался в GitHub Actions. Штатная остановка API проверена, а остановка при зависшем активном запросе остаётся непроверенной. API-квота охватывает весь `/api/v1`, включая 404/405. `/livez` и пути вне этого префикса не лимитируются; локальный Compose публикует порт только на loopback.

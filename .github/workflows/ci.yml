@@ -1,0 +1,47 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Check formatting
+        run: |
+          unformatted=$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)
+          if [ -n "$unformatted" ]; then
+            printf 'Unformatted Go files:\n%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Check generated OpenAPI
+        run: |
+          go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml
+          git diff --exit-code -- internal/httpapi/generated/openapi.gen.go
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test -count=1 ./...
+
+      - name: Integration tests with race detector
+        run: go test -race -count=1 -tags=integration -timeout=8m ./tests/integration
+
+      - name: Build service
+        run: go build -o "$RUNNER_TEMP/safeboard-service" ./cmd/service
+
+      - name: Build Docker image
+        run: docker build -t safeboard:ci .

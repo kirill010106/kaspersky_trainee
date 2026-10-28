@@ -22,8 +22,8 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) != 1 || args[0] != "migrate" {
-		return errors.New("usage: service migrate")
+	if len(args) != 1 {
+		return errors.New("usage: service <migrate|serve>")
 	}
 
 	ctx, stop := signal.NotifyContext(
@@ -33,7 +33,14 @@ func run(args []string) error {
 	)
 	defer stop()
 
-	return runMigrate(ctx)
+	switch args[0] {
+	case "migrate":
+		return runMigrate(ctx)
+	case "serve":
+		return runServe(ctx, stop)
+	default:
+		return errors.New("usage: service <migrate|serve>")
+	}
 }
 
 func runMigrate(ctx context.Context) error {

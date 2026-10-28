@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:16.15-alpine3.24
+    environment:
+      POSTGRES_DB: safeboard
+      POSTGRES_USER: safeboard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U safeboard -d safeboard"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  migrate:
+    build: .
+    image: safeboard:local
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: "postgres://safeboard:${POSTGRES_PASSWORD}@db:5432/safeboard?sslmode=disable"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: safeboard:local
+    command: ["serve"]
+    environment:
+      DATABASE_URL: "postgres://safeboard:${POSTGRES_PASSWORD}@db:5432/safeboard?sslmode=disable"
+      HTTPS_ADDR: ":8443"
+      TLS_CERT_FILE: /run/secrets/tls_cert
+      TLS_KEY_FILE: /run/secrets/tls_key
+      READER_KEY: ${READER_KEY:?set READER_KEY}
+      WRITER_KEY: ${WRITER_KEY:?set WRITER_KEY}
+    secrets:
+      - tls_cert
+      - tls_key
+    ports:
+      - "127.0.0.1:8443:8443"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 15s
+
+volumes:
+  postgres_data:
+
+secrets:
+  tls_cert:
+    file: ./.local/safeboard.pem
+  tls_key:
+    file: ./.local/safeboard.key

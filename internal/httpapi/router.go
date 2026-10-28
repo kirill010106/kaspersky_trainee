@@ -5,12 +5,16 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"mime"
 	"net/http"
+	"net/netip"
 	"strings"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/httprate"
 	nethttpmiddleware "github.com/oapi-codegen/nethttp-middleware"
 
 	"github.com/kirill010106/kaspersky_trainee/internal/httpapi/generated"
@@ -18,6 +22,16 @@ import (
 )
 
 type requestIDContextKey struct{}
+
+type RouterOptions struct {
+	ReaderKey              string
+	WriterKey              string
+	CheckReady             func(context.Context) error
+	ReadinessTimeout       time.Duration
+	APIRatePerMinute       int
+	ReadinessRatePerMinute int
+	Logger                 *slog.Logger
+}
 
 func responseHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,14 +47,22 @@ func responseHeaders(next http.Handler) http.Handler {
 // NewRouter creates the HTTP router for the threat service.
 func NewRouter(
 	threatService *service.Service,
-	readerKey string,
-	writerKey string,
+	options RouterOptions,
 ) (http.Handler, error) {
 	if threatService == nil {
 		return nil, errors.New("threat service must not be nil")
 	}
+	if options.CheckReady == nil {
+		return nil, errors.New("readiness check must not be nil")
+	}
+	if options.ReadinessTimeout <= 0 {
+		return nil, errors.New("readiness timeout must be positive")
+	}
+	if options.APIRatePerMinute <= 0 || options.ReadinessRatePerMinute <= 0 {
+		return nil, errors.New("rate limits must be positive")
+	}
 
-	auth, err := newAuthenticator(readerKey, writerKey)
+	auth, err := newAuthenticator(options.ReaderKey, options.WriterKey)
 	if err != nil {
 		return nil, fmt.Errorf("configure authentication: %w", err)
 	}
@@ -90,7 +112,20 @@ func NewRouter(
 
 	router := chi.NewRouter()
 
-	router.Use(responseHeaders)
+	logger := options.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	apiLimit := newIPRateLimiter(options.APIRatePerMinute)
+	readyLimit := newIPRateLimiter(options.ReadinessRatePerMinute)
+
+	router.Use(
+		responseHeaders,
+		accessLog(logger),
+		recoverPanic(logger),
+		limitBusinessAPI(apiLimit),
+	)
 
 	router.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, generated.ErrorResponse{
@@ -122,6 +157,27 @@ func NewRouter(
 		writeJSON(w, http.StatusMethodNotAllowed, generated.ErrorResponse{
 			Message: "method not allowed",
 		})
+	})
+
+	router.Get("/livez", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	router.With(readyLimit).Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		checkCtx, cancel := context.WithTimeout(
+			r.Context(),
+			options.ReadinessTimeout,
+		)
+		defer cancel()
+
+		if err := options.CheckReady(checkCtx); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, generated.ErrorResponse{
+				Message: "service unavailable",
+			})
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
 	})
 
 	router.With(
@@ -175,4 +231,44 @@ func requireJSON(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func newIPRateLimiter(perMinute int) func(http.Handler) http.Handler {
+	return httprate.LimitBy(
+		perMinute,
+		time.Minute,
+		func(r *http.Request) (string, error) {
+			peer, err := netip.ParseAddrPort(r.RemoteAddr)
+			if err != nil {
+				return "", err
+			}
+			return peer.Addr().Unmap().String(), nil
+		},
+		httprate.WithLimitHandler(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After", "60")
+			writeJSON(w, http.StatusTooManyRequests, generated.ErrorResponse{
+				Message: "too many requests",
+			})
+		}),
+		httprate.WithErrorHandler(func(w http.ResponseWriter, _ *http.Request, _ error) {
+			writeJSON(w, http.StatusInternalServerError, generated.ErrorResponse{
+				Message: "internal server error",
+			})
+		}),
+	)
+}
+
+func limitBusinessAPI(limit func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		limited := limit(next)
+
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1" ||
+				strings.HasPrefix(r.URL.Path, "/api/v1/") {
+				limited.ServeHTTP(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
