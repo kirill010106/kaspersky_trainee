@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -398,6 +399,71 @@ func TestRouterRateLimits(t *testing.T) {
 		t.Fatalf("wrong API method status = %d, want 405", got)
 	}
 	assertLimited(send(http.MethodGet, apiPath, "192.0.2.3:10003", ""))
+}
+
+func TestRouterInternalErrorDiagnostics(t *testing.T) {
+	const privateDetail = "postgres://private-dsn-secret"
+
+	tests := []struct {
+		name      string
+		cause     error
+		wantClass string
+	}{
+		{"timeout", fmt.Errorf("%s: %w", privateDetail, context.DeadlineExceeded), "timeout"},
+		{"other error", errors.New(privateDetail), "internal"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			options := testRouterOptions()
+			options.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+			repository := &fakeRepository{
+				get: func(context.Context, string) (domain.Threat, error) {
+					return domain.Threat{}, tt.cause
+				},
+			}
+			router, err := NewRouter(service.New(repository), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			request := httptest.NewRequest(http.MethodGet,
+				"/api/v1/info/d41d8cd98f00b204e9800998ecf8427e", nil)
+			request.Header.Set("Authorization", "Bearer "+options.ReaderKey)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500", response.Code)
+			}
+			requestID := response.Header().Get("X-Request-ID")
+			if requestID == "" {
+				t.Fatal("missing request ID")
+			}
+			if strings.Contains(response.Body.String(), privateDetail) || strings.Contains(logs.String(), privateDetail) {
+				t.Fatal("private error detail leaked to response or logs")
+			}
+
+			found := false
+			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+				var event map[string]any
+				if err := json.Unmarshal([]byte(line), &event); err != nil {
+					t.Fatalf("decode log: %v", err)
+				}
+				if event["msg"] != "request failed" {
+					continue
+				}
+				found = true
+				if event["request_id"] != requestID || event["error_class"] != tt.wantClass {
+					t.Fatalf("diagnostic event = %v", event)
+				}
+			}
+			if !found {
+				t.Fatal("missing diagnostic event")
+			}
+		})
+	}
 }
 
 func TestRecoverPanic(t *testing.T) {

@@ -110,14 +110,13 @@ func NewRouter(
 		},
 	)
 
-	handler := &handlers{service: threatService}
-
 	router := chi.NewRouter()
 
 	logger := options.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
+	handler := &handlers{service: threatService, logger: logger}
 
 	apiLimit := newIPRateLimiter(options.APIRatePerMinute)
 	readyLimit := newIPRateLimiter(options.ReadinessRatePerMinute)
@@ -247,7 +246,6 @@ func newIPRateLimiter(perMinute int) func(http.Handler) http.Handler {
 			return peer.Addr().Unmap().String(), nil
 		},
 		httprate.WithLimitHandler(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Retry-After", "60")
 			writeJSON(w, http.StatusTooManyRequests, generated.ErrorResponse{
 				Message: "too many requests",
 			})

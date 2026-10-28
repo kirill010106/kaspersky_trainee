@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json/v2"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -17,6 +19,7 @@ const maxRequestBody = 32 * 1024
 
 type handlers struct {
 	service *service.Service
+	logger  *slog.Logger
 }
 
 func (h *handlers) getThreat(w http.ResponseWriter, r *http.Request) {
@@ -24,7 +27,7 @@ func (h *handlers) getThreat(w http.ResponseWriter, r *http.Request) {
 
 	threat, err := h.service.Get(r.Context(), md5)
 	if err != nil {
-		writeServiceError(w, err)
+		h.writeServiceError(w, r, err)
 		return
 	}
 
@@ -43,7 +46,7 @@ func threatResponse(threat domain.Threat) generated.ThreatResponse {
 	}
 }
 
-func writeServiceError(w http.ResponseWriter, err error) {
+func (h *handlers) writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	if _, ok := errors.AsType[*domain.ValidationError](err); ok {
 		writeJSON(w, http.StatusBadRequest, generated.ErrorResponse{
 			Message: "invalid request",
@@ -63,6 +66,21 @@ func writeServiceError(w http.ResponseWriter, err error) {
 			Message: "threat already exists",
 		})
 		return
+	}
+
+	errorClass := "internal"
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		errorClass = "timeout"
+	case errors.Is(err, context.Canceled):
+		errorClass = "canceled"
+	}
+	if h.logger != nil {
+		requestID, _ := r.Context().Value(requestIDContextKey{}).(string)
+		h.logger.ErrorContext(r.Context(), "request failed",
+			"request_id", requestID,
+			"error_class", errorClass,
+		)
 	}
 
 	writeJSON(w, http.StatusInternalServerError, generated.ErrorResponse{
@@ -105,7 +123,7 @@ func (h *handlers) createThreat(w http.ResponseWriter, r *http.Request) {
 
 	threat, err := h.service.Create(r.Context(), request.Md5, data)
 	if err != nil {
-		writeServiceError(w, err)
+		h.writeServiceError(w, r, err)
 		return
 	}
 
@@ -134,7 +152,7 @@ func (h *handlers) updateThreat(w http.ResponseWriter, r *http.Request) {
 
 	threat, err := h.service.Replace(r.Context(), chi.URLParam(r, "md5"), data)
 	if err != nil {
-		writeServiceError(w, err)
+		h.writeServiceError(w, r, err)
 		return
 	}
 
