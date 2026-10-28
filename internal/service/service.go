@@ -21,6 +21,7 @@ type Repository interface {
 	Replace(ctx context.Context, md5 string, data domain.ThreatData) (domain.Threat, error)
 }
 
+// Service applies domain rules before storing or retrieving threats.
 type Service struct {
 	repository Repository
 }
@@ -54,6 +55,8 @@ func (s *Service) Create(ctx context.Context, md5 string, data domain.ThreatData
 	return s.repository.Create(ctx, normalizedMD5, normalizedData)
 }
 
+// Replace fully replaces editable fields of an existing threat.
+// It returns an error matching ErrNotFound when the MD5 does not exist.
 func (s *Service) Replace(ctx context.Context, md5 string, data domain.ThreatData) (domain.Threat, error) {
 	normalizedMD5, err := domain.NormalizeMD5(md5)
 	if err != nil {

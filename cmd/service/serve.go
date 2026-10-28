@@ -94,7 +94,9 @@ func runServe(ctx context.Context, stopSignals context.CancelFunc) error {
 		return fmt.Errorf("serve HTTPS: %w", err)
 
 	case <-ctx.Done():
+		// Stop intercepting signals so another interrupt can terminate shutdown.
 		stopSignals()
+		// The signal context is canceled; Shutdown needs its own deadline.
 		shutdownCtx, cancelShutdown := context.WithTimeout(
 			context.Background(),
 			cfg.ShutdownTimeout,

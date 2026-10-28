@@ -5,8 +5,8 @@ import (
 	"unicode/utf8"
 )
 
-// NormalizeAndValidate returns normalized metadata without modifying the receiver.
-// Description is preserved from trimming
+// NormalizeAndValidate trims Name and validates editable threat metadata.
+// It leaves Description unchanged and does not modify the receiver.
 func (data ThreatData) NormalizeAndValidate() (ThreatData, error) {
 	if !utf8.ValidString(data.Name) || strings.ContainsRune(data.Name, 0) {
 		return ThreatData{}, &ValidationError{

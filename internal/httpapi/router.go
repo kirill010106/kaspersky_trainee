@@ -23,6 +23,8 @@ import (
 
 type requestIDContextKey struct{}
 
+// RouterOptions supplies authentication, readiness, and rate-limit settings.
+// Logger may be nil; NewRouter then uses slog.Default.
 type RouterOptions struct {
 	ReaderKey              string
 	WriterKey              string

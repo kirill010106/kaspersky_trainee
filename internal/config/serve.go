@@ -8,6 +8,7 @@ import (
 	"github.com/ilyakaznacheev/cleanenv"
 )
 
+// ServeConfig holds the environment settings required to run the HTTPS API.
 type ServeConfig struct {
 	DatabaseURL            string        `env:"DATABASE_URL" env-required:"true"`
 	HTTPSAddr              string        `env:"HTTPS_ADDR" env-required:"true"`
@@ -28,6 +29,8 @@ type ServeConfig struct {
 	ReadinessRatePerMinute int           `env:"READINESS_RATE_PER_MINUTE" env-default:"120"`
 }
 
+// LoadServe reads and validates server settings from the process environment.
+// It does not load a .env file.
 func LoadServe() (ServeConfig, error) {
 	var cfg ServeConfig
 	if err := cleanenv.ReadEnv(&cfg); err != nil {

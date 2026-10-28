@@ -23,7 +23,8 @@ type Repository struct {
 
 var _ service.Repository = (*Repository)(nil)
 
-// New creates a repository with a timeout for each database operation.
+// New creates a repository. queryTimeout bounds Get, Create, and Replace;
+// CheckReady uses its caller's context.
 func New(pool *pgxpool.Pool, queryTimeout time.Duration) (*Repository, error) {
 	if pool == nil {
 		return nil, errors.New("postgres pool is nil")
@@ -38,6 +39,8 @@ func New(pool *pgxpool.Pool, queryTimeout time.Duration) (*Repository, error) {
 	}, nil
 }
 
+// CheckReady checks access to the expected threat columns without reading rows.
+// It does not verify the goose migration version or schema constraints.
 func (r *Repository) CheckReady(ctx context.Context) error {
 	const query = `
 		SELECT md5, name, description, type, severity, created_at, updated_at

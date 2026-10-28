@@ -25,6 +25,7 @@ const (
 	SeverityCritical Severity = "critical"
 )
 
+// ThreatData holds editable metadata; MD5 and timestamps are managed separately.
 type ThreatData struct {
 	Name        string
 	Description string
@@ -32,6 +33,7 @@ type ThreatData struct {
 	Severity    Severity
 }
 
+// Threat is a stored record with its canonical MD5 and database timestamps.
 type Threat struct {
 	MD5         string
 	Name        string
